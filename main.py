@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import random
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
@@ -22,36 +23,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Simulated GPS coordinates for demo
+DEMO_LOCATIONS = [
+    {"lat": 40.7128, "lng": -74.0060, "name": "New York, NY"},
+    {"lat": 34.0522, "lng": -118.2437, "name": "Los Angeles, CA"},
+    {"lat": 41.8781, "lng": -87.6298, "name": "Chicago, IL"},
+    {"lat": 29.7604, "lng": -95.3698, "name": "Houston, TX"},
+]
+
 APP_STATE: Dict[str, Any] = {
     "network": "Connected",
     "gps": "Reliable",
     "battery": 72,
     "session": "Inactive",
-    "lastReliableLocation": {
-        "lat": 40.7128,
-        "lng": -74.0060,
-        "timestamp": "2026-10-06T14:30:00Z",
-    },
+    "lastReliableLocation": random.choice(DEMO_LOCATIONS),
     "journey": None,
     "queuedEvents": [],
-    "timeline": [
-        {"time": "14:30", "event": "Full Protection"},
-        {"time": "14:34", "event": "GPS signal weakened"},
-        {"time": "14:34", "event": "Switched to Degraded Protection"},
-        {"time": "14:37", "event": "Network unavailable"},
-        {"time": "14:37", "event": "Entered Offline Safety Mode"},
-        {"time": "14:40", "event": "Network restored"},
-        {"time": "14:40", "event": "Safety session recovered"},
-    ],
+    "timeline": [],
     "emergency": False,
     "trustedContacts": [],
-    "journeyHistory": [],
-    "safetyHistory": [
-        {"time": "14:30", "type": "Status", "message": "Full Protection"},
-        {"time": "14:34", "type": "GPS", "message": "GPS signal weakened"},
-        {"time": "14:37", "type": "Network", "message": "Network unavailable"},
-        {"time": "14:40", "type": "Recovery", "message": "Safety session recovered"},
-    ],
+    "safetyHistory": [],
 }
 
 
@@ -91,17 +82,6 @@ def init_db() -> None:
         )
         """
     )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS journeys (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            destination TEXT NOT NULL,
-            started_at TEXT NOT NULL,
-            status TEXT NOT NULL,
-            estimated_arrival TEXT NOT NULL
-        )
-        """
-    )
     conn.commit()
     conn.close()
 
@@ -114,7 +94,11 @@ def add_event(type_: str, message: str) -> None:
     )
     conn.commit()
     conn.close()
-    APP_STATE["safetyHistory"].append({"time": now_clock(), "type": type_, "message": message})
+    APP_STATE["safetyHistory"].append({
+        "time": now_clock(),
+        "type": type_,
+        "message": message,
+    })
 
 
 def add_timeline_event(event: str) -> None:
@@ -151,8 +135,6 @@ def get_overall_state() -> str:
         degraded_count += 1
     if APP_STATE["battery"] <= 30:
         degraded_count += 1
-    if APP_STATE["session"] in {"Paused", "Recovered", "Offline Safety Mode", "Battery Awareness", "Critical Safety Mode"}:
-        degraded_count += 1
 
     if critical_count > 0:
         return "EMERGENCY MODE"
@@ -165,16 +147,21 @@ def get_overall_state() -> str:
 
 def get_safety_status_payload() -> Dict[str, Any]:
     overall = get_overall_state()
-    mode_explanation = {
-        "FULL PROTECTION": "All important services available.",
-        "DEGRADED PROTECTION": "One service has reduced reliability, but the system continues safely in fallback mode.",
-        "LIMITED PROTECTION": "Multiple services are degraded or unavailable; essential safety functions are prioritized.",
-        "EMERGENCY MODE": "A critical safety capability is unavailable or a simulated emergency event has been triggered.",
+    mode_explanations = {
+        "FULL PROTECTION": "🟢 All important services available.",
+        "DEGRADED PROTECTION": "🟡 One service has reduced reliability. System continues in fallback mode.",
+        "LIMITED PROTECTION": "🟠 Multiple systems degraded. Prioritizing essential safety functions.",
+        "EMERGENCY MODE": "🔴 Critical capability unavailable or emergency triggered.",
     }
 
-    payload = {
+    gps_label = {
+        "Unavailable": "GPS unavailable — using last reliable location",
+        "Weak": "Location signal weak",
+        "Reliable": "Location reliable",
+    }.get(APP_STATE["gps"], "Location status unknown")
+
+    return {
         "overallState": overall,
-        "status": overall,
         "network": APP_STATE["network"],
         "gps": APP_STATE["gps"],
         "battery": APP_STATE["battery"],
@@ -182,18 +169,17 @@ def get_safety_status_payload() -> Dict[str, Any]:
         "session": APP_STATE["session"],
         "journey": APP_STATE["journey"],
         "lastReliableLocation": APP_STATE["lastReliableLocation"],
-        "gpsLabel": "GPS unavailable — using last reliable location" if APP_STATE["gps"] == "Unavailable" else "Location signal weak" if APP_STATE["gps"] == "Weak" else "Location reliable",
+        "gpsLabel": gps_label,
         "queuedEvents": APP_STATE["queuedEvents"],
         "timeline": APP_STATE["timeline"],
-        "safetyHistory": APP_STATE["safetyHistory"][-8:],
+        "safetyHistory": APP_STATE["safetyHistory"][-10:],
         "emergency": APP_STATE["emergency"],
-        "modeExplanation": mode_explanation.get(overall, "System status unknown."),
+        "modeExplanation": mode_explanations.get(overall, "System status unknown."),
     }
-    return payload
 
 
 def queue_local_event(message: str) -> None:
-    APP_STATE["queuedEvents"].append({"at": now_iso(), "message": message})
+    APP_STATE["queuedEvents"].append({"at": now_clock(), "message": message})
 
 
 def clear_local_queue() -> None:
@@ -217,13 +203,6 @@ def load_contacts() -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def load_events() -> List[Dict[str, Any]]:
-    conn = get_db_connection()
-    rows = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT 50").fetchall()
-    conn.close()
-    return [dict(row) for row in rows]
-
-
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -234,7 +213,6 @@ HTML_PAGE = """
   <style>
     :root {
       --bg: #071a2d;
-      --panel: #0e233c;
       --card: rgba(18, 45, 79, 0.92);
       --border: rgba(125, 178, 255, 0.25);
       --text: #edf6ff;
@@ -255,10 +233,6 @@ HTML_PAGE = """
       min-height: 100vh;
     }
 
-    button, input {
-      font: inherit;
-    }
-
     .container {
       max-width: 1100px;
       margin: 0 auto;
@@ -269,8 +243,7 @@ HTML_PAGE = """
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 12px;
-      margin-bottom: 16px;
+      margin-bottom: 20px;
     }
 
     .brand {
@@ -278,7 +251,6 @@ HTML_PAGE = """
       align-items: center;
       gap: 12px;
       font-weight: 700;
-      letter-spacing: 0.02em;
     }
 
     .brand-badge {
@@ -292,14 +264,13 @@ HTML_PAGE = """
     }
 
     .prototype-pill {
-      padding: 7px 10px;
-      border-radius: 999px;
       background: rgba(255, 183, 3, 0.12);
       color: #ffd77b;
       border: 1px solid rgba(255, 183, 3, 0.45);
+      border-radius: 999px;
+      padding: 7px 10px;
       font-size: 11px;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
       font-weight: 700;
     }
 
@@ -307,9 +278,9 @@ HTML_PAGE = """
       background: linear-gradient(135deg, rgba(76, 201, 240, 0.15), rgba(19, 58, 92, 0.92));
       border: 1px solid var(--border);
       border-radius: 26px;
+      padding: 24px;
+      margin-bottom: 20px;
       box-shadow: var(--shadow);
-      padding: 24px 18px;
-      margin-bottom: 18px;
     }
 
     .hero h1 {
@@ -319,7 +290,7 @@ HTML_PAGE = """
     }
 
     .tagline {
-      margin: 0;
+      margin: 0 0 16px;
       color: var(--muted);
       font-size: 1rem;
       line-height: 1.5;
@@ -329,7 +300,6 @@ HTML_PAGE = """
       display: flex;
       flex-wrap: wrap;
       gap: 12px;
-      margin-top: 18px;
     }
 
     .btn {
@@ -343,29 +313,12 @@ HTML_PAGE = """
       color: #0d1d2c;
       box-shadow: 0 8px 18px rgba(0,0,0,0.16);
     }
-    .btn:hover { transform: translateY(-1px); }
-    .btn.primary {
-      background: linear-gradient(135deg, var(--primary), #6bdcff);
-      color: #062035;
-    }
-    .btn.warning {
-      background: linear-gradient(135deg, #ff9f43, #ff7b54);
-      color: white;
-    }
-    .btn.danger {
-      background: linear-gradient(135deg, var(--danger), #ff3b4d);
-      color: white;
-    }
-    .btn.secondary {
-      background: rgba(255,255,255,0.08);
-      color: var(--text);
-      border: 1px solid rgba(255,255,255,0.12);
-    }
-    .btn.ghost {
-      background: transparent;
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 12px 24px rgba(0,0,0,0.2); }
+    .btn.primary { background: linear-gradient(135deg, var(--primary), #6bdcff); }
+    .btn.warning { background: linear-gradient(135deg, #ff9f43, #ff7b54); color: white; }
+    .btn.danger { background: linear-gradient(135deg, var(--danger), #ff3b4d); color: white; }
+    .btn.secondary { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); }
+    .btn.ghost { background: transparent; border: 1px solid var(--border); }
 
     .grid {
       display: grid;
@@ -383,24 +336,21 @@ HTML_PAGE = """
 
     .card-header {
       display: flex;
-      align-items: center;
       justify-content: space-between;
-      gap: 12px;
+      align-items: center;
       margin-bottom: 16px;
     }
 
-    .card h2, .card h3 { margin: 0; }
+    .card h2 { margin: 0; }
 
     .status-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 7px;
+      display: inline-block;
       border-radius: 999px;
-      padding: 6px 12px;
+      padding: 8px 14px;
       font-size: 12px;
       font-weight: 700;
-      letter-spacing: 0.04em;
       text-transform: uppercase;
+      letter-spacing: 0.04em;
       border: 1px solid transparent;
     }
 
@@ -427,33 +377,32 @@ HTML_PAGE = """
       display: block;
       color: var(--muted);
       font-size: 11px;
-      letter-spacing: 0.08em;
       text-transform: uppercase;
+      letter-spacing: 0.08em;
       margin-bottom: 7px;
     }
 
     .metric-value {
       font-size: clamp(1.15rem, 5vw, 1.65rem);
       font-weight: 800;
-      display: block;
     }
 
-    .chip-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
+    .info-list {
+      display: grid;
+      gap: 12px;
       margin-top: 12px;
     }
 
-    .chip {
-      padding: 7px 10px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.1);
-      background: rgba(255,255,255,0.03);
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 600;
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
     }
+    .info-row:last-child { border-bottom: 0; }
+
+    .muted { color: var(--muted); }
 
     .demo-controls {
       display: grid;
@@ -461,35 +410,6 @@ HTML_PAGE = """
       gap: 10px;
       margin-top: 12px;
     }
-
-    .journey-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .timer {
-      font-size: 2rem;
-      font-weight: 800;
-      letter-spacing: 0.06em;
-    }
-
-    .info-list {
-      display: grid;
-      gap: 10px;
-      margin-top: 10px;
-    }
-
-    .info-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      border-bottom: 1px solid rgba(255,255,255,0.06);
-      padding-bottom: 8px;
-    }
-    .info-row:last-child { border-bottom: 0; padding-bottom: 0; }
-
-    .muted { color: var(--muted); }
 
     .timeline {
       list-style: none;
@@ -503,13 +423,27 @@ HTML_PAGE = """
       border-left: 2px solid rgba(76, 201, 240, 0.5);
       padding-left: 12px;
       color: var(--muted);
-      line-height: 1.5;
+      font-size: 14px;
     }
 
     .timeline .time {
       color: var(--text);
       font-weight: 700;
       margin-right: 8px;
+    }
+
+    .contact-list, .history-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .contact-item, .history-item {
+      background: rgba(255,255,255,0.02);
+      border: 1px solid rgba(255,255,255,0.06);
+      border-radius: 12px;
+      padding: 12px 14px;
+      font-size: 14px;
     }
 
     .form-grid {
@@ -526,60 +460,13 @@ HTML_PAGE = """
       padding: 12px 14px;
       color: var(--text);
     }
+
     .form-grid input::placeholder { color: #98afd0; }
-
-    .history-list, .contact-list {
-      display: grid;
-      gap: 10px;
-      margin-top: 12px;
-    }
-
-    .history-item, .contact-item {
-      background: rgba(255,255,255,0.02);
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 12px;
-      padding: 12px 14px;
-    }
-
-    .privacy-grid {
-      display: grid;
-      gap: 12px;
-      margin-top: 10px;
-    }
-
-    .privacy-point {
-      display: flex;
-      align-items: flex-start;
-      gap: 12px;
-      background: rgba(255,255,255,0.02);
-      border-radius: 12px;
-      padding: 12px 14px;
-      border: 1px solid rgba(255,255,255,0.06);
-    }
-
-    .privacy-dot {
-      width: 10px; height: 10px; border-radius: 50%;
-      background: linear-gradient(135deg, var(--success), var(--primary));
-      margin-top: 6px;
-      flex-shrink: 0;
-    }
-
-    details {
-      margin-top: 18px;
-      background: rgba(255,255,255,0.02);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 12px;
-      padding: 12px 14px;
-    }
-    details summary {
-      cursor: pointer;
-      font-weight: 700;
-    }
 
     .modal {
       position: fixed;
       inset: 0;
-      background: rgba(4, 14, 28, 0.7);
+      background: rgba(4, 14, 28, 0.8);
       display: none;
       align-items: center;
       justify-content: center;
@@ -593,14 +480,12 @@ HTML_PAGE = """
       background: #0d2140;
       border: 1px solid var(--border);
       border-radius: 22px;
-      padding: 22px 18px 18px;
+      padding: 22px 18px;
       box-shadow: var(--shadow);
     }
 
-    .modal h3 {
-      margin: 0 0 8px;
-      font-size: 1.5rem;
-    }
+    .modal h3 { margin: 0 0 12px; font-size: 1.5rem; }
+    .modal p { margin: 0 0 12px; }
 
     .modal-actions {
       display: flex;
@@ -609,17 +494,19 @@ HTML_PAGE = """
       margin-top: 18px;
     }
 
+    .success-msg {
+      background: rgba(57, 217, 138, 0.12);
+      border: 1px solid rgba(57, 217, 138, 0.4);
+      color: #80edb2;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin-top: 12px;
+      font-size: 14px;
+    }
+
     @media (min-width: 768px) {
-      .grid {
-        grid-template-columns: 1.3fr 1fr;
-      }
-      .hero {
-        padding: 30px 28px;
-      }
-      .container { padding: 24px 20px 90px; }
-      .demo-controls {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-      }
+      .grid { grid-template-columns: 1.3fr 1fr; }
+      .demo-controls { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     }
   </style>
 </head>
@@ -634,11 +521,8 @@ HTML_PAGE = """
     </header>
 
     <section class="hero">
-      <h1>Safety that continues when technology doesn’t.</h1>
-      <p class="tagline">
-        SafeWalk AI continuously checks whether the safety system itself is functioning and automatically adapts when network, GPS, battery, or connectivity becomes unreliable.
-      </p>
-
+      <h1>Safety that continues when technology doesn't.</h1>
+      <p class="tagline">SafeWalk AI continuously checks whether the safety system itself is functioning and automatically adapts when network, GPS, battery, or connectivity becomes unreliable.</p>
       <div class="hero-actions">
         <button class="btn primary" id="startJourneyBtn">Start SafeWalk</button>
         <button class="btn danger" id="sosBtn">Emergency SOS</button>
@@ -652,7 +536,6 @@ HTML_PAGE = """
             <h2>Current Safety Status</h2>
             <span id="overallBadge" class="status-badge status-full">FULL PROTECTION</span>
           </div>
-
           <div class="stat-grid">
             <div class="metric">
               <span class="metric-label">Journey Status</span>
@@ -671,18 +554,73 @@ HTML_PAGE = """
               <span class="metric-value" id="batteryStatusText">72%</span>
             </div>
           </div>
-
-          <div class="chip-row">
-            <span class="chip">Safety Session: <strong id="sessionText">Inactive</strong></span>
-            <span class="chip">Last Reliable Location: <strong id="locationText">40.7128, -74.0060</strong></span>
+          <div class="info-list">
+            <div class="info-row">
+              <span class="muted">Current Location</span>
+              <strong id="currentLocationText">40.7128, -74.0060</strong>
+            </div>
+            <div class="info-row">
+              <span class="muted">Safety Session</span>
+              <strong id="sessionText">Inactive</strong>
+            </div>
+            <div class="info-row">
+              <span class="muted">Status Explanation</span>
+              <strong id="explainText">All important services available.</strong>
+            </div>
           </div>
         </section>
 
         <section class="card" style="margin-top: 16px;">
           <div class="card-header">
-            <h2>Safety System Health</h2>
+            <h2>SafeWalk Active Session</h2>
           </div>
+          <div class="info-list">
+            <div class="info-row">
+              <span class="muted">Destination</span>
+              <strong id="destinationText">Not started</strong>
+            </div>
+            <div class="info-row">
+              <span class="muted">Journey Time</span>
+              <strong id="timerText">00:00</strong>
+            </div>
+            <div class="info-row">
+              <span class="muted">Journey Status</span>
+              <strong id="journeyStateText">Standby</strong>
+            </div>
+            <div class="info-row">
+              <span class="muted">Estimated Arrival</span>
+              <strong id="etaText">—</strong>
+            </div>
+          </div>
+          <div class="hero-actions" style="margin-top: 12px;">
+            <button class="btn secondary" id="checkinBtn">I'm Safe (Check-in)</button>
+            <button class="btn danger" id="sessionSosBtn">Emergency</button>
+          </div>
+        </section>
 
+        <section class="card" style="margin-top: 16px;">
+          <h2>Safety Timeline</h2>
+          <ul id="timelineList" class="timeline"></ul>
+        </section>
+      </main>
+
+      <aside>
+        <section class="card">
+          <h2>Developer Demo Controls</h2>
+          <p class="muted">Click a button to simulate system state changes in real-time.</p>
+          <div class="demo-controls">
+            <button class="btn warning" id="gpsFailBtn">📡 GPS Failure</button>
+            <button class="btn warning" id="networkFailBtn">🌐 Network Down</button>
+            <button class="btn primary" id="networkRecoveryBtn">✅ Recover Network</button>
+            <button class="btn secondary" id="batteryLowBtn">🔋 Low Battery</button>
+            <button class="btn secondary" id="batteryCriticalBtn">⚠️ Critical Battery</button>
+            <button class="btn ghost" id="resetDemoBtn">🔄 Reset All</button>
+          </div>
+          <div id="feedbackMsg"></div>
+        </section>
+
+        <section class="card" style="margin-top: 16px;">
+          <h2>System Health</h2>
           <div class="info-list">
             <div class="info-row">
               <span class="muted">Network</span>
@@ -694,218 +632,51 @@ HTML_PAGE = """
             </div>
             <div class="info-row">
               <span class="muted">Battery</span>
-              <strong id="batteryDetail">Normal</strong>
+              <strong id="batteryDetail">Normal (72%)</strong>
             </div>
             <div class="info-row">
-              <span class="muted">Safety Session</span>
-              <strong id="sessionDetail">Inactive</strong>
-            </div>
-            <div class="info-row">
-              <span class="muted">Last Reliable Location</span>
-              <strong id="lastLocationDetail">40.7128, -74.0060</strong>
-            </div>
-          </div>
-
-          <div class="card-header" style="margin-top: 18px;">
-            <h3>Overall System State</h3>
-          </div>
-          <div class="status-badge status-full" id="overallBadgeLarge">FULL PROTECTION</div>
-          <p class="muted" id="stateDescription" style="margin-top: 12px;">All important services available.</p>
-        </section>
-
-        <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>SafeWalk Session</h2>
-          </div>
-
-          <div class="journey-head">
-            <div>
-              <div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;">Destination</div>
-              <strong id="destinationText">Not started</strong>
-            </div>
-            <div class="timer" id="timerText">00:00</div>
-          </div>
-
-          <div class="info-list">
-            <div class="info-row">
-              <span class="muted">Current location</span>
-              <strong id="currentLocationText">Waiting for GPS</strong>
-            </div>
-            <div class="info-row">
-              <span class="muted">Safety status</span>
-              <strong id="safetyStatusText">Standby</strong>
-            </div>
-            <div class="info-row">
-              <span class="muted">Estimated arrival</span>
-              <strong id="etaText">—</strong>
-            </div>
-          </div>
-
-          <div class="hero-actions">
-            <button class="btn secondary" id="checkinBtn">I’m Safe</button>
-            <button class="btn danger" id="sessionSosBtn">Emergency</button>
-          </div>
-        </section>
-
-        <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>Responsible AI / Privacy</h2>
-          </div>
-
-          <div class="privacy-grid">
-            <div class="privacy-point">
-              <div class="privacy-dot"></div>
-              <div>Sensitive data should be processed locally whenever possible, especially in offline or degraded protection modes.</div>
-            </div>
-            <div class="privacy-point">
-              <div class="privacy-dot"></div>
-              <div>Raw camera or audio data should not be stored unnecessarily; this prototype intentionally limits data retention.</div>
-            </div>
-            <div class="privacy-point">
-              <div class="privacy-dot"></div>
-              <div>Location should only be collected during an active safety session and is clearly labeled as a demo/prototype.</div>
-            </div>
-            <div class="privacy-point">
-              <div class="privacy-dot"></div>
-              <div>This app is a prototype and not a replacement for emergency services. It simulates alerts and notifications only.</div>
+              <span class="muted">Queued Events</span>
+              <strong id="queueDetail">0 events</strong>
             </div>
           </div>
         </section>
 
         <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>How our innovation works</h2>
-          </div>
-          <p class="muted">
-            SafeWalk does not only detect danger. It continuously checks whether the safety system itself is functioning and automatically adapts when network, GPS, battery, or connectivity becomes unreliable.
-          </p>
-        </section>
-      </main>
-
-      <aside>
-        <section class="card">
-          <div class="card-header">
-            <h2>Developer Demo Controls</h2>
-          </div>
-
-          <div class="demo-controls">
-            <button class="btn warning" id="gpsFailBtn">Simulate GPS Failure</button>
-            <button class="btn warning" id="networkFailBtn">Simulate Network Failure</button>
-            <button class="btn primary" id="networkRecoveryBtn">Simulate Network Recovery</button>
-            <button class="btn secondary" id="batteryLowBtn">Low Battery</button>
-            <button class="btn secondary" id="batteryCriticalBtn">Critical Battery</button>
-            <button class="btn ghost" id="resetDemoBtn">Reset Demo</button>
-          </div>
-        </section>
-
-        <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>Fallback Logic</h2>
-          </div>
-          <div class="info-list">
-            <div class="info-row">
-              <span class="muted">Network degraded</span>
-              <strong>Offline Safety Mode</strong>
-            </div>
-            <div class="info-row">
-              <span class="muted">GPS unreliable</span>
-              <strong>Use last reliable location</strong>
-            </div>
-            <div class="info-row">
-              <span class="muted">Battery low</span>
-              <strong>Battery Saver mode</strong>
-            </div>
-            <div class="info-row">
-              <span class="muted">Recovery</span>
-              <strong>Sync and resume</strong>
-            </div>
-          </div>
-        </section>
-
-        <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>Trusted Contacts</h2>
-          </div>
-
+          <h2>Trusted Contacts</h2>
           <form id="contactForm" class="form-grid">
             <input type="text" id="nameInput" placeholder="Name" required />
             <input type="text" id="relationshipInput" placeholder="Relationship" required />
-            <input type="tel" id="phoneInput" placeholder="Phone Number" required />
+            <input type="tel" id="phoneInput" placeholder="Phone" required />
             <button class="btn primary" type="submit">Add Contact</button>
           </form>
-
           <div id="contactList" class="contact-list"></div>
         </section>
 
         <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>Safety History</h2>
-          </div>
+          <h2>Safety History</h2>
           <div id="historyList" class="history-list"></div>
-        </section>
-
-        <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>Explainable Safety Timeline</h2>
-          </div>
-          <ul id="timelineList" class="timeline"></ul>
-        </section>
-
-        <section class="card" style="margin-top: 16px;">
-          <div class="card-header">
-            <h2>System Health / Technical Details</h2>
-          </div>
-
-          <details open>
-            <summary>View technical details</summary>
-            <div class="info-list">
-              <div class="info-row">
-                <span class="muted">Connectivity</span>
-                <strong id="techNetwork">Connected</strong>
-              </div>
-              <div class="info-row">
-                <span class="muted">Location source</span>
-                <strong id="techGps">Reliable</strong>
-              </div>
-              <div class="info-row">
-                <span class="muted">Battery awareness</span>
-                <strong id="techBattery">Normal</strong>
-              </div>
-              <div class="info-row">
-                <span class="muted">Session continuity</span>
-                <strong id="techSession">Active</strong>
-              </div>
-              <div class="info-row">
-                <span class="muted">Queue sync</span>
-                <strong id="techQueue">0 events queued</strong>
-              </div>
-            </div>
-          </details>
         </section>
       </aside>
     </div>
   </div>
 
-  <div id="sosModal" class="modal" aria-hidden="true">
+  <div id="sosModal" class="modal">
     <div class="modal-card">
-      <h3>Emergency Demo</h3>
-      <p class="muted">DEMO — No real emergency message has been sent.</p>
-      <p class="muted">This will trigger a simulated safety alert and notify a trusted contact using demo data.</p>
-
+      <h3>🚨 Emergency Demo Alert</h3>
+      <p class="muted"><strong>DEMO MODE</strong> — No real emergency has been sent.</p>
       <div class="info-list">
         <div class="info-row">
           <span class="muted">Location</span>
-          <strong id="modalLocation">40.7128, -74.0060</strong>
+          <strong id="modalLocation">—</strong>
         </div>
         <div class="info-row">
           <span class="muted">Time</span>
           <strong id="modalTime">—</strong>
         </div>
       </div>
-
       <div class="modal-actions">
         <button class="btn ghost" id="cancelSosBtn">Cancel</button>
-        <button class="btn danger" id="confirmSosBtn">Confirm Demo Alert</button>
+        <button class="btn danger" id="confirmSosBtn">Confirm Alert</button>
       </div>
     </div>
   </div>
@@ -915,8 +686,14 @@ HTML_PAGE = """
       timerSeconds: 0,
       timerInterval: null,
       lastStatus: null,
-      activeJourney: null
+      isJourneyActive: false,
     };
+
+    function showFeedback(message, type = 'success') {
+      const el = document.getElementById('feedbackMsg');
+      el.innerHTML = `<div class="success-msg">${message}</div>`;
+      setTimeout(() => { el.innerHTML = ''; }, 3000);
+    }
 
     function setBadge(el, status) {
       el.className = 'status-badge';
@@ -927,23 +704,19 @@ HTML_PAGE = """
       el.textContent = status;
     }
 
-    function updateBadges(status) {
-      const ids = ['overallBadge', 'overallBadgeLarge'];
-      ids.forEach((id) => {
-        const el = document.getElementById(id);
-        if (el) setBadge(el, status);
-      });
-    }
-
     function setText(id, value) {
       const el = document.getElementById(id);
       if (el) el.textContent = value;
     }
 
-    function updateJourneyTimer() {
-      const minutes = Math.floor(state.timerSeconds / 60).toString().padStart(2, '0');
-      const seconds = (state.timerSeconds % 60).toString().padStart(2, '0');
-      setText('timerText', `${minutes}:${seconds}`);
+    function startTimer() {
+      if (state.timerInterval) clearInterval(state.timerInterval);
+      state.timerInterval = setInterval(() => {
+        state.timerSeconds += 1;
+        const mins = Math.floor(state.timerSeconds / 60).toString().padStart(2, '0');
+        const secs = (state.timerSeconds % 60).toString().padStart(2, '0');
+        setText('timerText', `${mins}:${secs}`);
+      }, 1000);
     }
 
     function stopTimer() {
@@ -951,234 +724,201 @@ HTML_PAGE = """
         clearInterval(state.timerInterval);
         state.timerInterval = null;
       }
+      state.timerSeconds = 0;
     }
 
-    function startTimer() {
-      stopTimer();
-      state.timerInterval = setInterval(() => {
-        state.timerSeconds += 1;
-        updateJourneyTimer();
-      }, 1000);
-    }
-
-    function renderContacts(contacts) {
-      const list = document.getElementById('contactList');
-      list.innerHTML = '';
-      if (!contacts || contacts.length === 0) {
-        list.innerHTML = '<div class="contact-item">No trusted contacts added yet.</div>';
-        return;
-      }
-      contacts.forEach((contact) => {
-        const item = document.createElement('div');
-        item.className = 'contact-item';
-        item.innerHTML = `
-          <strong>${contact.name}</strong><br />
-          <span class="muted">${contact.relationship}</span><br />
-          <span class="muted">${contact.phone}</span>
-        `;
-        list.appendChild(item);
-      });
-    }
-
-    function renderHistory(events) {
-      const list = document.getElementById('historyList');
-      list.innerHTML = '';
-      if (!events || events.length === 0) {
-        list.innerHTML = '<div class="history-item">No safety history yet.</div>';
-        return;
-      }
-      [...events].reverse().forEach((event) => {
-        const item = document.createElement('div');
-        item.className = 'history-item';
-        item.innerHTML = `
-          <div class="muted">${event.time}</div>
-          <div><strong>${event.type}</strong></div>
-          <div>${event.message}</div>
-        `;
-        list.appendChild(item);
-      });
-    }
-
-    function renderTimeline(timeline) {
+    function renderTimeline(items) {
       const list = document.getElementById('timelineList');
       list.innerHTML = '';
-      if (!timeline || timeline.length === 0) {
-        list.innerHTML = '<li>No timeline yet.</li>';
+      if (!items || items.length === 0) {
+        list.innerHTML = '<li style="color: var(--muted);">No events yet.</li>';
         return;
       }
-      [...timeline].reverse().forEach((entry) => {
-        const item = document.createElement('li');
-        item.innerHTML = `<span class="time">${entry.time}</span> — ${entry.event}`;
-        list.appendChild(item);
+      [...items].reverse().forEach((item) => {
+        const li = document.createElement('li');
+        li.innerHTML = `<span class="time">${item.time}</span> ${item.event}`;
+        list.appendChild(li);
       });
     }
 
-    async function fetchJson(url, options = {}) {
-      const response = await fetch(url, {
-        headers: { 'Content-Type': 'application/json' },
-        ...options,
-      });
-      if (!response.ok) {
-        throw new Error(`Request failed: ${response.status}`);
+    function renderHistory(items) {
+      const list = document.getElementById('historyList');
+      list.innerHTML = '';
+      if (!items || items.length === 0) {
+        list.innerHTML = '<div class="history-item">No history yet.</div>';
+        return;
       }
+      [...items].reverse().slice(0, 8).forEach((item) => {
+        const div = document.createElement('div');
+        div.className = 'history-item';
+        div.innerHTML = `<strong>${item.type}</strong> (${item.time})<br /><span class="muted">${item.message}</span>`;
+        list.appendChild(div);
+      });
+    }
+
+    function renderContacts(items) {
+      const list = document.getElementById('contactList');
+      list.innerHTML = '';
+      if (!items || items.length === 0) {
+        list.innerHTML = '<div class="contact-item">No contacts yet.</div>';
+        return;
+      }
+      items.forEach((contact) => {
+        const div = document.createElement('div');
+        div.className = 'contact-item';
+        div.innerHTML = `<strong>${contact.name}</strong><br /><span class="muted">${contact.relationship} • ${contact.phone}</span>`;
+        list.appendChild(div);
+      });
+    }
+
+    async function fetchApi(url, method = 'GET', body = null) {
+      const options = { method, headers: { 'Content-Type': 'application/json' } };
+      if (body) options.body = JSON.stringify(body);
+      const response = await fetch(url, options);
+      if (!response.ok) throw new Error(`${response.status}`);
       return await response.json();
     }
 
     async function loadStatus() {
       try {
-        const data = await fetchJson('/safety-status');
+        const data = await fetchApi('/safety-status');
         state.lastStatus = data;
+
         const overall = data.overallState || 'FULL PROTECTION';
-        updateBadges(overall);
+        setBadge(document.getElementById('overallBadge'), overall);
 
         setText('journeyStatusText', data.journey ? data.journey.status : 'Inactive');
         setText('gpsStatusText', data.gps || 'Reliable');
         setText('networkStatusText', data.network || 'Connected');
-        setText('batteryStatusText', `${data.battery || 72}%`);
+        setText('batteryStatusText', `${data.battery}%`);
+        setText('currentLocationText', data.lastReliableLocation ? `${data.lastReliableLocation.lat}, ${data.lastReliableLocation.lng}` : 'Unknown');
         setText('sessionText', data.session || 'Inactive');
-        setText('locationText', data.lastReliableLocation ? `${data.lastReliableLocation.lat}, ${data.lastReliableLocation.lng}` : 'Unknown');
+        setText('explainText', data.modeExplanation || 'System status unknown.');
 
-        setText('networkDetail', data.network || 'Connected');
-        setText('gpsDetail', data.gps || 'Reliable');
-        setText('batteryDetail', data.batteryMode || 'Normal');
-        setText('sessionDetail', data.session || 'Inactive');
-        setText('lastLocationDetail', data.lastReliableLocation ? `${data.lastReliableLocation.lat}, ${data.lastReliableLocation.lng}` : 'Unknown');
-        setText('stateDescription', data.modeExplanation || 'All important services available.');
-
-        setText('techNetwork', data.network || 'Connected');
-        setText('techGps', data.gps || 'Reliable');
-        setText('techBattery', data.batteryMode || 'Normal');
-        setText('techSession', data.session || 'Inactive');
-        setText('techQueue', `${(data.queuedEvents || []).length} events queued`);
+        setText('networkDetail', data.network);
+        setText('gpsDetail', data.gps);
+        setText('batteryDetail', `${data.batteryMode} (${data.battery}%)`);
+        setText('queueDetail', `${data.queuedEvents.length} events queued`);
 
         if (data.journey) {
-          const j = data.journey;
-          setText('destinationText', j.destination || 'Not started');
-          setText('safetyStatusText', j.safetyStatus || 'Standby');
-          setText('etaText', j.estimatedArrival || '—');
-          setText('currentLocationText', j.currentLocation || 'Waiting for GPS');
-          state.activeJourney = { ...j, isRunning: j.status === 'Active' || j.status === 'Recovered' };
-          if (state.activeJourney.isRunning) startTimer();
-          else {
-            stopTimer();
-            setText('timerText', '00:00');
+          setText('destinationText', data.journey.destination);
+          setText('journeyStateText', data.journey.safetyStatus);
+          setText('etaText', data.journey.estimatedArrival || '—');
+          if (!state.isJourneyActive && data.journey.status === 'Active') {
+            state.isJourneyActive = true;
+            state.timerSeconds = 0;
+            startTimer();
           }
         } else {
           setText('destinationText', 'Not started');
-          setText('safetyStatusText', 'Standby');
+          setText('journeyStateText', 'Standby');
           setText('etaText', '—');
-          setText('currentLocationText', 'Waiting for GPS');
-          state.activeJourney = null;
-          stopTimer();
           setText('timerText', '00:00');
+          state.isJourneyActive = false;
+          stopTimer();
         }
 
-        renderTimeline(data.timeline || []);
-        renderHistory(data.safetyHistory || []);
+        renderTimeline(data.timeline);
+        renderHistory(data.safetyHistory);
       } catch (error) {
-        console.error(error);
+        console.error('Load status error:', error);
       }
     }
 
     async function loadContacts() {
       try {
-        const data = await fetchJson('/trusted-contacts');
+        const data = await fetchApi('/trusted-contacts');
         renderContacts(data.contacts || []);
       } catch (error) {
-        console.error(error);
+        console.error('Load contacts error:', error);
       }
     }
 
     async function startJourney() {
       try {
-        const data = await fetchJson('/journey/start', {
-          method: 'POST',
-          body: JSON.stringify({ destination: 'Downtown Station', estimatedArrival: '19:15' })
-        });
-        if (data.success) await loadStatus();
+        await fetchApi('/journey/start', 'POST', { destination: 'Downtown Station', estimatedArrival: '19:15' });
+        showFeedback('✅ SafeWalk journey started! Now monitoring your safety.');
+        await loadStatus();
       } catch (error) {
-        console.error(error);
+        showFeedback('❌ Failed to start journey', 'error');
       }
     }
 
-    async function triggerDemo(url) {
+    async function triggerDemo(endpoint, name) {
       try {
-        const data = await fetchJson(url, { method: 'POST' });
-        if (data.success) await loadStatus();
+        await fetchApi(endpoint, 'POST');
+        showFeedback(`✅ ${name}`);
+        await loadStatus();
       } catch (error) {
-        console.error(error);
+        showFeedback(`❌ ${name} failed`, 'error');
       }
     }
 
-    function openEmergencyModal() {
+    function openSosModal() {
       const modal = document.getElementById('sosModal');
       modal.classList.add('open');
-      const loc = state.lastStatus?.lastReliableLocation || { lat: 40.7128, lng: -74.0060 };
+      const loc = state.lastStatus?.lastReliableLocation || { lat: 0, lng: 0 };
       setText('modalLocation', `${loc.lat}, ${loc.lng}`);
       setText('modalTime', new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     }
 
-    async function confirmEmergency() {
+    async function confirmSos() {
       try {
-        const data = await fetchJson('/emergency/demo', { method: 'POST' });
+        await fetchApi('/emergency/demo', 'POST');
         document.getElementById('sosModal').classList.remove('open');
-        if (data.success) await loadStatus();
+        showFeedback('🚨 Emergency demo alert sent!');
+        await loadStatus();
       } catch (error) {
-        console.error(error);
+        showFeedback('❌ Failed to send alert', 'error');
       }
     }
 
-    async function addContact(event) {
-      event.preventDefault();
+    async function addContact(e) {
+      e.preventDefault();
       const name = document.getElementById('nameInput').value.trim();
       const relationship = document.getElementById('relationshipInput').value.trim();
       const phone = document.getElementById('phoneInput').value.trim();
-
       if (!name || !relationship || !phone) return;
-
       try {
-        const data = await fetchJson('/trusted-contacts', {
-          method: 'POST',
-          body: JSON.stringify({ name, relationship, phone })
-        });
-        if (data.success) {
-          document.getElementById('contactForm').reset();
-          await loadContacts();
-        }
+        await fetchApi('/trusted-contacts', 'POST', { name, relationship, phone });
+        document.getElementById('contactForm').reset();
+        showFeedback(`✅ Contact ${name} added`);
+        await loadContacts();
       } catch (error) {
-        console.error(error);
+        showFeedback('❌ Failed to add contact', 'error');
       }
     }
 
     async function checkInSafe() {
       try {
-        const data = await fetchJson('/journey/status', { method: 'POST' });
-        if (data.success) await loadStatus();
+        await fetchApi('/journey/status', 'POST');
+        showFeedback('✅ Check-in received. Stay safe!');
+        await loadStatus();
       } catch (error) {
-        console.error(error);
+        showFeedback('❌ Check-in failed', 'error');
       }
     }
 
     document.getElementById('startJourneyBtn').addEventListener('click', startJourney);
-    document.getElementById('sosBtn').addEventListener('click', openEmergencyModal);
-    document.getElementById('sessionSosBtn').addEventListener('click', openEmergencyModal);
-    document.getElementById('confirmSosBtn').addEventListener('click', confirmEmergency);
+    document.getElementById('sosBtn').addEventListener('click', openSosModal);
+    document.getElementById('sessionSosBtn').addEventListener('click', openSosModal);
+    document.getElementById('confirmSosBtn').addEventListener('click', confirmSos);
     document.getElementById('cancelSosBtn').addEventListener('click', () => {
       document.getElementById('sosModal').classList.remove('open');
     });
 
-    document.getElementById('gpsFailBtn').addEventListener('click', () => triggerDemo('/demo/gps/failure'));
-    document.getElementById('networkFailBtn').addEventListener('click', () => triggerDemo('/demo/network/offline'));
-    document.getElementById('networkRecoveryBtn').addEventListener('click', () => triggerDemo('/demo/network/recovery'));
-    document.getElementById('batteryLowBtn').addEventListener('click', () => triggerDemo('/demo/battery/low'));
-    document.getElementById('batteryCriticalBtn').addEventListener('click', () => triggerDemo('/demo/battery/critical'));
-    document.getElementById('resetDemoBtn').addEventListener('click', () => triggerDemo('/demo/reset'));
+    document.getElementById('gpsFailBtn').addEventListener('click', () => triggerDemo('/demo/gps/failure', '📡 GPS Failure Simulated'));
+    document.getElementById('networkFailBtn').addEventListener('click', () => triggerDemo('/demo/network/offline', '🌐 Network Offline Simulated'));
+    document.getElementById('networkRecoveryBtn').addEventListener('click', () => triggerDemo('/demo/network/recovery', '✅ Network Recovered'));
+    document.getElementById('batteryLowBtn').addEventListener('click', () => triggerDemo('/demo/battery/low', '🔋 Low Battery Mode'));
+    document.getElementById('batteryCriticalBtn').addEventListener('click', () => triggerDemo('/demo/battery/critical', '⚠️ Critical Battery Mode'));
+    document.getElementById('resetDemoBtn').addEventListener('click', () => triggerDemo('/demo/reset', '🔄 Demo Reset'));
     document.getElementById('checkinBtn').addEventListener('click', checkInSafe);
     document.getElementById('contactForm').addEventListener('submit', addContact);
 
     loadStatus();
     loadContacts();
-    setInterval(loadStatus, 5000);
+    setInterval(loadStatus, 2000);
   </script>
 </body>
 </html>
@@ -1189,6 +929,7 @@ HTML_PAGE = """
 def startup_event() -> None:
     init_db()
     APP_STATE["trustedContacts"] = load_contacts()
+    add_timeline_event("SafeWalk AI Started")
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1202,7 +943,6 @@ def health() -> Dict[str, Any]:
         "status": "ok",
         "service": "SafeWalk AI",
         "timestamp": now_iso(),
-        "prototype": True,
     }
 
 
@@ -1222,39 +962,24 @@ def journey_start(payload: Dict[str, Any]) -> Dict[str, Any]:
         "currentLocation": f"{APP_STATE['lastReliableLocation']['lat']}, {APP_STATE['lastReliableLocation']['lng']}",
         "safetyStatus": "Monitoring",
         "estimatedArrival": estimated_arrival,
-        "startedAt": now_iso(),
     }
-    APP_STATE["emergency"] = False
-    add_timeline_event("SafeWalk started")
-    add_event("Session", f"Journey started to {destination}")
-    return {"success": True, "journey": APP_STATE["journey"], "status": get_safety_status_payload()}
+    add_timeline_event(f"Journey started to {destination}")
+    add_event("Journey", f"SafeWalk started: {destination}")
+    return {"success": True}
 
 
 @app.post("/journey/status")
 @app.get("/journey/status")
 def journey_status() -> Dict[str, Any]:
-    if APP_STATE["journey"] is None:
-        return {"success": False, "message": "No active journey"}
-    APP_STATE["journey"]["status"] = "Active"
-    APP_STATE["journey"]["safetyStatus"] = "Monitoring"
-    APP_STATE["session"] = "Active"
-    return {"success": True, "journey": APP_STATE["journey"]}
-
-
-@app.get("/events")
-def events() -> Dict[str, Any]:
-    return {
-        "events": load_events(),
-        "timeline": APP_STATE["timeline"],
-        "queuedEvents": APP_STATE["queuedEvents"],
-    }
+    if not APP_STATE["journey"]:
+        return {"success": False}
+    add_event("Check-in", "User confirmed safety at this location")
+    return {"success": True}
 
 
 @app.get("/trusted-contacts")
 def get_contacts() -> Dict[str, Any]:
-    contacts = load_contacts()
-    APP_STATE["trustedContacts"] = contacts
-    return {"contacts": contacts}
+    return {"contacts": load_contacts()}
 
 
 @app.post("/trusted-contacts")
@@ -1263,87 +988,64 @@ def create_contact(payload: Dict[str, Any]) -> Dict[str, Any]:
     relationship = (payload.get("relationship") or "").strip()
     phone = (payload.get("phone") or "").strip()
     if not name or not relationship or not phone:
-        raise HTTPException(status_code=400, detail="Name, relationship and phone are required.")
-    contact = {"name": name, "relationship": relationship, "phone": phone}
-    persist_contact(contact)
-    APP_STATE["trustedContacts"] = load_contacts()
-    add_event("Contact", f"Trusted contact added: {name}")
-    return {"success": True, "contacts": APP_STATE["trustedContacts"]}
+        raise HTTPException(status_code=400, detail="All fields required")
+    persist_contact({"name": name, "relationship": relationship, "phone": phone})
+    add_event("Contact", f"Added trusted contact: {name}")
+    return {"success": True}
 
 
 @app.post("/emergency/demo")
 def emergency_demo() -> Dict[str, Any]:
     APP_STATE["emergency"] = True
     APP_STATE["session"] = "Emergency"
-    APP_STATE["journey"] = APP_STATE["journey"] or {
-        "destination": "Demo route",
-        "status": "Emergency",
-        "currentLocation": f"{APP_STATE['lastReliableLocation']['lat']}, {APP_STATE['lastReliableLocation']['lng']}",
-        "safetyStatus": "Emergency",
-        "estimatedArrival": "—",
-        "startedAt": now_iso(),
-    }
-    add_timeline_event("Simulated emergency alert")
-    add_event("Emergency", "DEMO — No real emergency message has been sent.")
-    add_event("Contact", "Trusted contact notified with demo data.")
-    return {"success": True, "message": "Demo emergency alert sent to trusted contacts (simulated only).", "status": get_safety_status_payload()}
+    add_timeline_event("🚨 EMERGENCY ALERT (Demo)")
+    add_event("Emergency", "DEMO: Emergency alert triggered and sent to contacts")
+    return {"success": True}
 
 
 @app.post("/demo/gps/failure")
-def simulate_gps_failure() -> Dict[str, Any]:
+def gps_failure() -> Dict[str, Any]:
     APP_STATE["gps"] = "Unavailable"
-    APP_STATE["journey"] = APP_STATE["journey"] or {"destination": "Demo route", "status": "Active"}
-    APP_STATE["journey"]["currentLocation"] = f"{APP_STATE['lastReliableLocation']['lat']}, {APP_STATE['lastReliableLocation']['lng']}"
-    APP_STATE["journey"]["safetyStatus"] = "Fallback mode"
-    add_timeline_event("GPS lost")
-    add_timeline_event("Last reliable location stored")
-    add_event("GPS", "GPS unavailable — using last reliable location")
-    return {"success": True, "status": get_safety_status_payload()}
+    APP_STATE["lastReliableLocation"] = APP_STATE["lastReliableLocation"]
+    add_timeline_event("GPS signal lost — using last reliable location")
+    add_event("GPS", "GPS unavailable — fallback to last known location")
+    return {"success": True}
 
 
 @app.post("/demo/network/offline")
-def simulate_network_failure() -> Dict[str, Any]:
+def network_offline() -> Dict[str, Any]:
     APP_STATE["network"] = "Offline"
     APP_STATE["session"] = "Offline Safety Mode"
-    APP_STATE["journey"] = APP_STATE["journey"] or {"destination": "Demo route", "status": "Active"}
-    APP_STATE["journey"]["safetyStatus"] = "Offline Safety Mode"
-    queue_local_event("Network lost — events queued locally")
-    add_timeline_event("Network unavailable")
-    add_timeline_event("Entered Offline Safety Mode")
-    add_event("Network", "Offline Safety Mode — events queued locally")
-    return {"success": True, "status": get_safety_status_payload()}
+    queue_local_event("Network connection lost")
+    add_timeline_event("Network went offline — Offline Safety Mode activated")
+    add_event("Network", "Offline Safety Mode: queuing events locally")
+    return {"success": True}
 
 
 @app.post("/demo/network/recovery")
-def simulate_network_recovery() -> Dict[str, Any]:
+def network_recovery() -> Dict[str, Any]:
     APP_STATE["network"] = "Connected"
-    APP_STATE["session"] = "Recovered"
-    APP_STATE["journey"] = APP_STATE["journey"] or {"destination": "Demo route", "status": "Recovered"}
-    APP_STATE["journey"]["status"] = "Recovered"
-    APP_STATE["journey"]["safetyStatus"] = "Monitoring"
+    queued = len(APP_STATE["queuedEvents"])
     clear_local_queue()
-    add_timeline_event("Network restored")
-    add_timeline_event("Safety session recovered")
-    add_event("Recovery", "Network restored — queued events synchronized")
-    return {"success": True, "status": get_safety_status_payload()}
+    add_timeline_event(f"Network restored — synced {queued} queued events")
+    add_event("Recovery", f"Network recovered and synchronized {queued} events")
+    return {"success": True}
 
 
 @app.post("/demo/battery/low")
-def simulate_low_battery() -> Dict[str, Any]:
+def battery_low() -> Dict[str, Any]:
     APP_STATE["battery"] = 22
-    APP_STATE["session"] = "Battery Awareness"
-    add_timeline_event("Battery below 30% — Battery Awareness")
-    add_event("Battery", "Battery below 30% — Battery Awareness")
-    return {"success": True, "status": get_safety_status_payload()}
+    add_timeline_event("Battery below 30% — Battery Awareness Mode")
+    add_event("Battery", "Battery Awareness Mode activated at 22%")
+    return {"success": True}
 
 
 @app.post("/demo/battery/critical")
-def simulate_critical_battery() -> Dict[str, Any]:
+def battery_critical() -> Dict[str, Any]:
     APP_STATE["battery"] = 4
-    APP_STATE["session"] = "Critical Safety Mode"
-    add_timeline_event("Battery below 5% — Critical Safety Mode")
-    add_event("Battery", "Critical Safety Mode — prioritize emergency information")
-    return {"success": True, "status": get_safety_status_payload()}
+    add_timeline_event("Battery critical (4%) — Critical Safety Mode")
+    add_event("Battery", "Critical Battery Mode: preserving essential functions")
+    return {"success": True}
 
 
 @app.post("/demo/reset")
@@ -1355,21 +1057,13 @@ def reset_demo() -> Dict[str, Any]:
     APP_STATE["journey"] = None
     APP_STATE["queuedEvents"] = []
     APP_STATE["emergency"] = False
-    APP_STATE["timeline"] = [
-        {"time": "14:30", "event": "Full Protection"},
-        {"time": "14:34", "event": "GPS signal weakened"},
-        {"time": "14:34", "event": "Switched to Degraded Protection"},
-        {"time": "14:37", "event": "Network unavailable"},
-        {"time": "14:37", "event": "Entered Offline Safety Mode"},
-        {"time": "14:40", "event": "Network restored"},
-        {"time": "14:40", "event": "Safety session recovered"},
-    ]
-    add_event("Reset", "Demo reset to system start state")
-    return {"success": True, "status": get_safety_status_payload()}
+    APP_STATE["lastReliableLocation"] = random.choice(DEMO_LOCATIONS)
+    APP_STATE["timeline"] = []
+    add_timeline_event("Demo reset — system back to normal")
+    add_event("Reset", "Demo reset to initial state")
+    return {"success": True}
 
 
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
-
